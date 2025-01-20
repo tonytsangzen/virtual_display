@@ -8,7 +8,14 @@
 #include "threadtools.h"
 #include "systemtime.h"
 #include "d3drender.h"
+#include "headset_control.h"
 
+using namespace vr;
+
+#define REMOTE_DISPLAY
+//#define DEBUG_PIC
+
+#define LOCAL_DISPLAY
 namespace
 {
 	//-----------------------------------------------------------------------------
@@ -20,6 +27,7 @@ namespace
 	static const char * const k_pch_VirtualDisplay_AdditionalLatencyInSeconds_Float = "additionalLatencyInSeconds";
 	static const char * const k_pch_VirtualDisplay_DisplayWidth_Int32 = "displayWidth";
 	static const char * const k_pch_VirtualDisplay_DisplayHeight_Int32 = "displayHeight";
+	static const char * const k_pch_VirtualDisplay_DisplayFov_Float = "displayFov";
 	static const char * const k_pch_VirtualDisplay_DisplayRefreshRateNumerator_Int32 = "displayRefreshRateNumerator";
 	static const char * const k_pch_VirtualDisplay_DisplayRefreshRateDenominator_Int32 = "displayRefreshRateDenominator";
 	static const char * const k_pch_VirtualDisplay_AdapterIndex_Int32 = "adapterIndex";
@@ -93,7 +101,7 @@ namespace
 			}
 
 			std::string sInstallPath = vr::VRProperties()->GetStringProperty( vr::VRDriverHandle(), vr::Prop_InstallPath_String );
-			std::string sWorkingPath = sInstallPath + "\\bin\\win32";
+			std::string sWorkingPath = sInstallPath + "\\bin\\win64";
 
 			char buffer[ 256 ];
 			sprintf_s( buffer, "\"%s\\virtual_display.exe\" %d %d %d %d %d %d",
@@ -110,7 +118,7 @@ namespace
 				Log( "RemoteDevice: Failed to launch external process." );
 				return false;
 			}
-
+			Log("RemoteDevice: success");
 			return true;
 		}
 
@@ -224,6 +232,41 @@ namespace
 			return true;
 		}
 
+		void savebitmap(const uint32_t* data, int nImgW, int nImgH, const char* filename)
+		{
+
+			BITMAPINFOHEADER bmiHdr; //定义信息头        
+			bmiHdr.biSize = sizeof(BITMAPINFOHEADER);
+			bmiHdr.biWidth = nImgW;
+			bmiHdr.biHeight = nImgH;
+			bmiHdr.biPlanes = 1;
+			bmiHdr.biBitCount = 32;
+			bmiHdr.biCompression = BI_RGB;
+			bmiHdr.biSizeImage = nImgW * nImgH * 4;
+			bmiHdr.biXPelsPerMeter = 0;
+			bmiHdr.biYPelsPerMeter = 0;
+			bmiHdr.biClrUsed = 0;
+			bmiHdr.biClrImportant = 0;
+			FILE* fp;
+			fopen_s(&fp, filename, "wb");
+			if (fp)
+			{
+				BITMAPFILEHEADER fheader = { 0 };
+				fheader.bfType = 'M' << 8 | 'B';
+				fheader.bfSize = sizeof(BITMAPINFOHEADER) + sizeof(BITMAPFILEHEADER) + bmiHdr.biSizeImage;
+				fheader.bfOffBits = sizeof(BITMAPINFOHEADER) + sizeof(BITMAPFILEHEADER);
+				fwrite(&fheader, 1, sizeof(fheader), fp);
+				fwrite(&bmiHdr, 1, sizeof(BITMAPINFOHEADER), fp);
+				for (int i = nImgH - 1; i >= 0 ; i--) {
+					fwrite(&data[i*nImgW], 1, nImgW * 4, fp);
+				}
+				fclose(fp);
+				return;
+			}
+			else
+				return;
+		}
+
 		void Run() override
 		{
 			SetThreadPriority( GetCurrentThread(), THREAD_PRIORITY_MOST_URGENT );
@@ -247,10 +290,20 @@ namespace
 					if ( SUCCEEDED( m_pD3DRender->GetContext()->Map( m_pStagingTexture, 0, D3D11_MAP_READ, 0, &mapped ) ) )
 					{
 						EventWriteString( L"[VDispDvr] Map:Staging(end)" );
-
+						#ifdef DEBUG_PIC
+						static int frameCount = 0;
+						frameCount++;
+						if (frameCount % 300 == 0) {
+							char fname[32] = { 0 };
+							sprintf_s(fname, "c:\\test\\cap%d.bmp", frameCount);
+							Log("save pic: %s %d %d\n", fname, desc.Width, desc.Height);
+							savebitmap((const uint32_t*)mapped.pData, desc.Width, desc.Height, fname);
+						}
+						#endif
+						#ifdef REMOTE_DISPLAY
 						m_pRemoteDevice->Transmit( desc.Width, desc.Height, desc.Format,
 							( const BYTE * )mapped.pData, mapped.RowPitch, m_flVsyncTimeInSeconds );
-
+						#endif
 						m_pD3DRender->GetContext()->Unmap( m_pStagingTexture, 0 );
 					}
 				}
@@ -293,7 +346,7 @@ namespace
 // It implements the IVRVirtualDisplay component interface to provide us
 // hooks into the render pipeline.
 //-----------------------------------------------------------------------------
-class CDisplayRedirectLatest : public vr::ITrackedDeviceServerDriver, public vr::IVRVirtualDisplay
+class CDisplayRedirectLatest : public vr::ITrackedDeviceServerDriver, public vr::IVRDisplayComponent, public vr::IVRVirtualDisplay
 {
 public:
 	CDisplayRedirectLatest()
@@ -306,6 +359,7 @@ public:
 		, m_pRemoteDevice( NULL )
 		, m_pEncoder( NULL )
 	{
+		Log("CDisplayRedirectLatest");
 		vr::VRSettings()->GetString( k_pch_VirtualDisplay_Section,
 			vr::k_pch_Null_SerialNumber_String, m_rchSerialNumber, ARRAYSIZE( m_rchSerialNumber ) );
 		vr::VRSettings()->GetString( k_pch_VirtualDisplay_Section,
@@ -315,12 +369,17 @@ public:
 			vr::VRSettings()->GetFloat( k_pch_VirtualDisplay_Section,
 				k_pch_VirtualDisplay_AdditionalLatencyInSeconds_Float ) );
 
-		int32_t nDisplayWidth = vr::VRSettings()->GetInt32(
+		nDisplayWidth = vr::VRSettings()->GetInt32(
 			k_pch_VirtualDisplay_Section,
 			k_pch_VirtualDisplay_DisplayWidth_Int32 );
-		int32_t nDisplayHeight = vr::VRSettings()->GetInt32(
+		nDisplayHeight = vr::VRSettings()->GetInt32(
 			k_pch_VirtualDisplay_Section,
 			k_pch_VirtualDisplay_DisplayHeight_Int32 );
+
+		nDisplayFov = vr::VRSettings()->GetFloat(
+			k_pch_VirtualDisplay_Section,
+				k_pch_VirtualDisplay_DisplayFov_Float
+		);
 
 		int32_t nDisplayRefreshRateNumerator = vr::VRSettings()->GetInt32(
 			k_pch_VirtualDisplay_Section,
@@ -329,15 +388,12 @@ public:
 			k_pch_VirtualDisplay_Section,
 			k_pch_VirtualDisplay_DisplayRefreshRateDenominator_Int32 );
 
-		int32_t nAdapterIndex = vr::VRSettings()->GetInt32(
-			k_pch_VirtualDisplay_Section,
-			k_pch_VirtualDisplay_AdapterIndex_Int32 );
-
+		
 		m_pD3DRender = new CD3DRender();
 
 		// First initialize using the specified display dimensions to determine
 		// which graphics adapter the headset is attached to (if any).
-		if ( !m_pD3DRender->Initialize( nDisplayWidth, nDisplayHeight ) )
+		if (!m_pD3DRender->Initialize(0))
 		{
 			Log( "Could not find headset with display size %dx%d.", nDisplayWidth, nDisplayHeight );
 			return;
@@ -359,28 +415,17 @@ public:
 		wcstombs_s( 0, chAdapterDescription, nBufferSize, wchAdapterDescription, nBufferSize );
 		Log( "Headset connected to %s.", chAdapterDescription );
 
-		// If no adapter specified, choose the first one the headset *isn't* plugged into.
-		if ( nAdapterIndex < 0 )
-		{
-			nAdapterIndex = ( nDisplayAdapterIndex == 0 ) ? 1 : 0;
-		}
-		else if ( nDisplayAdapterIndex == nAdapterIndex )
-		{
-			Log( "Headset needs to be plugged into a separate graphics card." );
-			return;
-		}
-
 		// Store off the LUID of the primary gpu we want to use.
-		if ( !m_pD3DRender->GetAdapterLuid( nAdapterIndex, &m_nGraphicsAdapterLuid ) )
+		if ( !m_pD3DRender->GetAdapterLuid(nDisplayAdapterIndex, &m_nGraphicsAdapterLuid ) )
 		{
 			Log( "Failed to get adapter index for graphics adapter!" );
 			return;
 		}
 
 		// Now reinitialize using the other graphics card.
-		if ( !m_pD3DRender->Initialize( nAdapterIndex ) )
+		if ( !m_pD3DRender->Initialize(nDisplayAdapterIndex) )
 		{
-			Log( "Could not create graphics device for adapter %d.  Requires a minimum of two graphics cards.", nAdapterIndex );
+			Log( "Could not create graphics device for adapter %d.", nDisplayAdapterIndex);
 			return;
 		}
 
@@ -394,6 +439,7 @@ public:
 		Log( "Using %s as primary graphics adapter.", chAdapterDescription );
 
 		// Spawn our separate process to manage headset presentation.
+#ifdef REMOTE_DISPLAY
 		m_pRemoteDevice = new CRemoteDevice();
 		if ( !m_pRemoteDevice->Initialize(
 			nDisplayX, nDisplayY, nDisplayWidth, nDisplayHeight,
@@ -401,10 +447,13 @@ public:
 		{
 			return;
 		}
-
+#endif
 		// Spin up a separate thread to handle the overlapped encoding/transmit step.
 		m_pEncoder = new CEncoder( m_pD3DRender, m_pRemoteDevice );
 		m_pEncoder->Start();
+
+		Log("initial success.");
+		m_headSetInstance = getNativeGlassInstance();
 	}
 
 	virtual ~CDisplayRedirectLatest()
@@ -442,6 +491,8 @@ public:
 
 	virtual vr::EVRInitError Activate( uint32_t unObjectId ) override
 	{
+		Log("Activate: %08x", unObjectId);
+
 		m_unObjectId = unObjectId;
 
 		vr::PropertyContainerHandle_t ulContainer =
@@ -454,6 +505,11 @@ public:
 		vr::VRProperties()->SetUint64Property( ulContainer,
 			vr::Prop_GraphicsAdapterLuid_Uint64, m_nGraphicsAdapterLuid );
 
+		// create all the input components
+		vr::VRProperties()->SetStringProperty(ulContainer, vr::Prop_ContainsProximitySensor_Bool, "true");
+		vr::VRDriverInput()->CreateBooleanComponent(ulContainer, "/proximity", &m_proximity);
+		vr::VRDriverInput()->UpdateBooleanComponent(m_proximity, true, 0);
+
 		return vr::VRInitError_None;
 	}
 
@@ -464,14 +520,23 @@ public:
 
 	virtual void *GetComponent( const char *pchComponentNameAndVersion ) override
 	{
+		Log("GetComponent:%s", pchComponentNameAndVersion);
+
 		if ( !_stricmp( pchComponentNameAndVersion, vr::IVRVirtualDisplay_Version ) )
 		{
 			return static_cast< vr::IVRVirtualDisplay * >( this );
+		}
+		else if (!_stricmp(pchComponentNameAndVersion, vr::IVRDisplayComponent_Version)) {
+			return static_cast<vr::IVRDisplayComponent*>(this);
 		}
 		return NULL;
 	}
 
 	virtual void EnterStandby() override
+	{
+	}
+
+	virtual void PowerOff()
 	{
 	}
 
@@ -495,6 +560,12 @@ public:
 		pose.qDriverFromHeadRotation.x = 0;
 		pose.qDriverFromHeadRotation.y = 0;
 		pose.qDriverFromHeadRotation.z = 0;
+
+		pose.vecPosition[1] = 1.5;
+
+		if(m_headSetInstance)
+			pose.qRotation = m_headSetInstance->getPose();
+		pose.poseTimeOffset = std::chrono::high_resolution_clock::now().time_since_epoch().count() / 1000000000.f;
 		return pose;
 	}
 
@@ -503,12 +574,76 @@ public:
 		return m_rchSerialNumber;
 	}
 
+	//IVRDisplayComponent
+
+	virtual void GetWindowBounds(int32_t* pnX, int32_t* pnY, uint32_t* pnWidth, uint32_t* pnHeight)
+	{
+		*pnX = 0;
+		*pnY = 0;
+		*pnWidth = nDisplayWidth;
+		*pnHeight = nDisplayHeight;
+	}
+
+	virtual bool IsDisplayOnDesktop()
+	{
+		return false;
+	}
+
+	virtual bool IsDisplayRealDisplay()
+	{
+		return false;
+	}
+
+	virtual void GetRecommendedRenderTargetSize(uint32_t* pnWidth, uint32_t* pnHeight)
+	{
+		*pnWidth = nDisplayWidth;
+		*pnHeight = nDisplayHeight;
+	}
+
+	virtual void GetEyeOutputViewport(EVREye eEye, uint32_t* pnX, uint32_t* pnY, uint32_t* pnWidth, uint32_t* pnHeight)
+	{
+		*pnY = 0;
+		*pnWidth = nDisplayWidth / 2;
+		*pnHeight = nDisplayHeight;
+
+		if (eEye == Eye_Left)
+		{
+			*pnX = 0;
+		}
+		else
+		{
+			*pnX = nDisplayWidth / 2;
+		}
+	}
+
+	virtual void GetProjectionRaw(EVREye eEye, float* pfLeft, float* pfRight, float* pfTop, float* pfBottom)
+	{
+		float scale = nDisplayFov/120;
+
+		*pfLeft = -1.6 * scale;
+		*pfRight = 1.6 * scale;
+		*pfTop = -0.9 * scale;
+		*pfBottom = 0.9 * scale;
+	}
+
+	virtual DistortionCoordinates_t ComputeDistortion(EVREye eEye, float fU, float fV)
+	{
+		DistortionCoordinates_t coordinates;
+		coordinates.rfBlue[0] = fU;
+		coordinates.rfBlue[1] = fV;
+		coordinates.rfGreen[0] = fU;
+		coordinates.rfGreen[1] = fV;
+		coordinates.rfRed[0] = fU;
+		coordinates.rfRed[1] = fV;
+		return coordinates;
+	}
+
 	// IVRVirtualDisplay
 
-	virtual void Present( vr::SharedTextureHandle_t backbufferTextureHandle ) override
+	virtual void Present(const PresentInfo_t* pPresentInfo, uint32_t unPresentInfoSize)
 	{
 		// Open and cache our shared textures to avoid re-opening every frame.
-		ID3D11Texture2D *pTexture = m_pD3DRender->GetSharedTexture( ( HANDLE )backbufferTextureHandle );
+		ID3D11Texture2D *pTexture = m_pD3DRender->GetSharedTexture( ( HANDLE )pPresentInfo->backbufferTextureHandle );
 		if ( pTexture == NULL )
 		{
 			EventWriteString( L"[VDispDvr] Texture is NULL!" );
@@ -597,6 +732,7 @@ public:
 
 	virtual void WaitForPresent() override
 	{
+
 		EventWriteString( L"[VDispDvr] WaitForPresent(begin)" );
 
 		// First wait for rendering to finish on the gpu.
@@ -617,7 +753,7 @@ public:
 		// backbuffer into system memory.  We also pass in the earliest time that this frame
 		// should get presented.  This is the real vsync that starts our frame.
 		m_pEncoder->NewFrameReady( m_flLastVsyncTimeInSeconds + m_flAdditionalLatencyInSeconds );
-
+#ifdef REMOTE_DISPLAY
 		// Get latest timing info to work with.  This gets us sync'd up with the hardware in
 		// the first place, and also avoids any drifting over time.
 		double flLastVsyncTimeInSeconds;
@@ -648,7 +784,7 @@ public:
 		// And store it for use in GetTimeSinceLastVsync (below) and updating our next frame.
 		m_flLastVsyncTimeInSeconds += flFrameIntervalInSeconds * nLastVsyncToNextVsyncFrames;
 		m_nVsyncCounter = nVsyncCounter + nTimeRefToLastVsyncFrames + nLastVsyncToNextVsyncFrames;
-
+#endif
 		EventWriteString( L"[VDispDvr] WaitForPresent(end)" );
 	}
 
@@ -659,7 +795,26 @@ public:
 		return true;
 	}
 
+	void RunFrame()
+	{
+		// In a real driver, this should happen from some pose tracking thread.
+		// The RunFrame interval is unspecified and can be very irregular if some other
+		// driver blocks it for some periodic task.
+		if (m_unObjectId != vr::k_unTrackedDeviceIndexInvalid)
+		{
+			vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_unObjectId, GetPose(), sizeof(DriverPose_t));
+		}
+	}
+
 private:
+	HeadsetControl* m_headSetInstance = NULL;
+
+	int32_t nDisplayWidth;
+	int32_t nDisplayHeight;
+	float	nDisplayFov;
+
+	vr::VRInputComponentHandle_t m_proximity;
+
 	uint32_t m_unObjectId;
 	char m_rchSerialNumber[ 1024 ];
 	char m_rchModelNumber[ 1024 ];
@@ -691,7 +846,7 @@ public:
 		{ return vr::k_InterfaceVersions;  }
 	virtual const char *GetTrackedDeviceDriverVersion()
 		{ return vr::ITrackedDeviceServerDriver_Version; }
-	virtual void RunFrame() override {}
+	virtual void RunFrame();
 	virtual bool ShouldBlockStandbyMode() override { return false; }
 	virtual void EnterStandby() override {}
 	virtual void LeaveStandby() override {}
@@ -710,7 +865,7 @@ vr::EVRInitError CServerDriver_DisplayRedirect::Init( vr::IVRDriverContext *pCon
 	{
 		vr::VRServerDriverHost()->TrackedDeviceAdded(
 			m_pDisplayRedirectLatest->GetSerialNumber().c_str(),
-			vr::TrackedDeviceClass_DisplayRedirect,
+			vr::TrackedDeviceClass_HMD,
 			m_pDisplayRedirectLatest );
 	}
 
@@ -725,6 +880,20 @@ void CServerDriver_DisplayRedirect::Cleanup()
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 }
 
+
+void CServerDriver_DisplayRedirect::RunFrame()
+{
+	if (m_pDisplayRedirectLatest)
+	{
+		m_pDisplayRedirectLatest->RunFrame();
+	}
+
+	vr::VREvent_t vrEvent;
+	while (vr::VRServerDriverHost()->PollNextEvent(&vrEvent, sizeof(vrEvent)))
+	{
+
+	}
+}
 CServerDriver_DisplayRedirect g_serverDriverDisplayRedirect;
 
 //-----------------------------------------------------------------------------

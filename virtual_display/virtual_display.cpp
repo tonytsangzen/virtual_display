@@ -67,8 +67,7 @@ namespace
 		wc.hIconSm = wc.hIcon;
 
 		::RegisterClassExW( &wc );
-
-		return ::CreateWindowExW( k_WindowStyleEx, wc.lpszClassName, wc.lpszClassName, k_WindowStyle, wr.x, wr.y, wr.w, wr.h, NULL, 0, hInstance, NULL );
+		return ::CreateWindowExW( k_WindowStyleEx, wc.lpszClassName, wc.lpszClassName, k_WindowStyle, 0, -1080, wr.w, wr.h, NULL, 0, hInstance, NULL );
 	}
 
 	static void ToggleDesktopComposition( BOOL bEnableComposition )
@@ -95,8 +94,15 @@ namespace
 
 	bool ParseArgs( int argc, char **argv, WindowRect_t *pWindowRect, DXGI_RATIONAL *pRefreshRate )
 	{
-		if ( argc < 6 )
-			return false;
+		if (argc < 6) {
+			pWindowRect->x = 0;
+			pWindowRect->y = 0;
+			pWindowRect->w = 1920;
+			pWindowRect->h = 1080;
+			pRefreshRate->Numerator = 60;
+			pRefreshRate->Denominator = 1;
+			return true;
+		}
 
 		pWindowRect->x = atoi( argv[ 1 ] );
 		pWindowRect->y = atoi( argv[ 2 ] );
@@ -296,7 +302,8 @@ namespace
 			DXGI_FRAME_STATISTICS stats;
 			m_pDXGISwapChain->GetFrameStatistics( &stats );
 
-			while ( stats.PresentCount != nLastPresentCount )
+			//FIX ME: why  block at here? 
+			while ( stats.PresentCount > nLastPresentCount )
 			{
 				EventWriteString( L"RemoteDisplay: Waiting for next frame interval.." );
 				Sleep( 1 );
@@ -369,7 +376,7 @@ int WINAPI WinMain( HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
 
 	::ShowWindow( g_hWnd, SW_SHOWDEFAULT );
 
-	g_pD3DRender->SetFullscreen( TRUE );
+	//g_pD3DRender->SetFullscreen( TRUE );
 
 	CPresentThread *pPresentThread = new CPresentThread( g_pD3DRender->GetSwapChain(),
 		float( refreshRate.Denominator ) / refreshRate.Numerator );
